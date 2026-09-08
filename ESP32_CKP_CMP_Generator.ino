@@ -1,6 +1,7 @@
 /*
  * ESP32 CKP & CMP Signal Generator
  * Generador de señales CKP y CMP sincronizadas para simulador automotriz
+ * Compatible con ESP32 Arduino 3.x
  * 
  * Autor: Vicchentez
  * Fecha: 2026
@@ -70,17 +71,22 @@ volatile unsigned long ckp_pulse_start = 0;
 volatile unsigned long cmp_pulse_start = 0;
 const unsigned long PULSE_WIDTH_US = 2000;  // Ancho de pulso: 2ms
 
+// Variables para generador de pulsos por software
+volatile unsigned long ckp_period_us = 50000;  // Período en microsegundos
+volatile unsigned long cmp_period_us = 100000; // Período en microsegundos
+volatile unsigned long last_ckp_pulse = 0;
+volatile unsigned long last_cmp_pulse = 0;
+
 // ===== PROTOTIPOS DE FUNCIONES =====
 void setup_timers();
 void update_rpm_from_pot();
 void calculate_frequencies();
-void IRAM_ATTR ckp_timer_isr();
-void IRAM_ATTR cmp_timer_isr();
 void display_main_screen();
 void display_menu();
 void handle_buttons();
 void init_lcd();
-void calibrate_potentiometer();
+void generate_pulses();
+void check_lcd_address();
 
 // ===== SETUP =====
 void setup() {
@@ -88,6 +94,7 @@ void setup() {
   delay(1000);
   
   Serial.println("\n\n=== ESP32 CKP & CMP Signal Generator ===");
+  Serial.println("ESP32 Arduino 3.x Compatible");
   
   // Configurar pines
   pinMode(PIN_RPM_POT, INPUT);
@@ -105,9 +112,6 @@ void setup() {
   // Inicializar LCD
   init_lcd();
   
-  // Configurar timers de hardware
-  setup_timers();
-  
   Serial.println("Sistema inicializado correctamente");
   display_main_screen();
 }
@@ -116,6 +120,7 @@ void setup() {
 void loop() {
   update_rpm_from_pot();
   calculate_frequencies();
+  generate_pulses();  // Generador de pulsos por software
   handle_buttons();
   
   // Actualizar pantalla cada 100ms
@@ -129,11 +134,7 @@ void loop() {
     last_display = millis();
   }
   
-  // Verificar y actualizar estado de pulsos
-  check_pulse_width(PIN_CKP_OUTPUT, ckp_pulse_start);
-  check_pulse_width(PIN_CMP_OUTPUT, cmp_pulse_start);
-  
-  delay(10);
+  delay(5);
 }
 
 // ===== INICIALIZAR LCD =====
@@ -147,27 +148,43 @@ void init_lcd() {
   lcd.setCursor(2, 0);
   lcd.print("CKP & CMP GEN");
   lcd.setCursor(4, 1);
-  lcd.print("ESP32 v1.0");
+  lcd.print("ESP32 v2.0");
   
   delay(2000);
   lcd.clear();
 }
 
-// ===== CONFIGURAR TIMERS DE HARDWARE =====
-void setup_timers() {
-  // Timer 0 para CKP
-  timer_ckp = timerBegin(0, 80, true);  // 80 MHz / 80 = 1 MHz (1 µs por tick)
-  timerAttachInterrupt(timer_ckp, &ckp_timer_isr, true);
-  timerAlarmWrite(timer_ckp, 50000, true);  // 50ms inicial
-  timerAlarmEnable(timer_ckp);
+// ===== GENERADOR DE PULSOS (Software-based) =====
+void generate_pulses() {
+  unsigned long now = micros();
   
-  // Timer 1 para CMP
-  timer_cmp = timerBegin(1, 80, true);
-  timerAttachInterrupt(timer_cmp, &cmp_timer_isr, true);
-  timerAlarmWrite(timer_cmp, 100000, true);
-  timerAlarmEnable(timer_cmp);
+  // Generar pulso CKP
+  if (!ckp_pulse && (now - last_ckp_pulse >= ckp_period_us)) {
+    digitalWrite(PIN_CKP_OUTPUT, HIGH);
+    ckp_pulse = true;
+    ckp_pulse_start = now;
+    last_ckp_pulse = now;
+  }
   
-  Serial.println("Timers configurados");
+  // Verificar ancho de pulso CKP
+  if (ckp_pulse && (now - ckp_pulse_start >= PULSE_WIDTH_US)) {
+    digitalWrite(PIN_CKP_OUTPUT, LOW);
+    ckp_pulse = false;
+  }
+  
+  // Generar pulso CMP
+  if (!cmp_pulse && (now - last_cmp_pulse >= cmp_period_us)) {
+    digitalWrite(PIN_CMP_OUTPUT, HIGH);
+    cmp_pulse = true;
+    cmp_pulse_start = now;
+    last_cmp_pulse = now;
+  }
+  
+  // Verificar ancho de pulso CMP
+  if (cmp_pulse && (now - cmp_pulse_start >= PULSE_WIDTH_US)) {
+    digitalWrite(PIN_CMP_OUTPUT, LOW);
+    cmp_pulse = false;
+  }
 }
 
 // ===== LEER POTENCIÓMETRO Y CALCULAR RPM =====
@@ -200,50 +217,17 @@ void calculate_frequencies() {
   // CMP: típicamente 1 pulso por ciclo (2 revoluciones de cigüeñal)
   cmp_frequency = (rpm * cmp_pulses_per_cycle) / 120;
   
-  // Configurar timers (período en microsegundos)
+  // Configurar períodos en microsegundos
   if (ckp_frequency > 0) {
-    unsigned long period_ckp_us = 1000000 / ckp_frequency;
-    timerAlarmWrite(timer_ckp, period_ckp_us, true);
+    ckp_period_us = 1000000 / ckp_frequency;
+  } else {
+    ckp_period_us = 50000;  // Valor por defecto
   }
   
   if (cmp_frequency > 0) {
-    unsigned long period_cmp_us = 1000000 / cmp_frequency;
-    timerAlarmWrite(timer_cmp, period_cmp_us, true);
-  }
-}
-
-// ===== INTERRUPCIÓN TIMER CKP =====
-void IRAM_ATTR ckp_timer_isr() {
-  if (!ckp_pulse) {
-    digitalWrite(PIN_CKP_OUTPUT, HIGH);
-    ckp_pulse = true;
-    ckp_pulse_start = micros();
-  }
-}
-
-// ===== INTERRUPCIÓN TIMER CMP =====
-void IRAM_ATTR cmp_timer_isr() {
-  if (!cmp_pulse) {
-    digitalWrite(PIN_CMP_OUTPUT, HIGH);
-    cmp_pulse = true;
-    cmp_pulse_start = micros();
-  }
-}
-
-// ===== VERIFICAR ANCHO DE PULSO =====
-void check_pulse_width(int pin, unsigned long pulse_start) {
-  if (pulse_start > 0) {
-    unsigned long elapsed = micros() - pulse_start;
-    if (elapsed >= PULSE_WIDTH_US) {
-      digitalWrite(pin, LOW);
-      if (pin == PIN_CKP_OUTPUT) {
-        ckp_pulse = false;
-        ckp_pulse_start = 0;
-      } else {
-        cmp_pulse = false;
-        cmp_pulse_start = 0;
-      }
-    }
+    cmp_period_us = 1000000 / cmp_frequency;
+  } else {
+    cmp_period_us = 100000;  // Valor por defecto
   }
 }
 
@@ -321,8 +305,6 @@ void display_menu() {
       lcd.setCursor(0, 1);
       lcd.print("CKP:");
       lcd.print(ckp_frequency);
-      lcd.print("Hz CMP:");
-      lcd.print(cmp_frequency);
       lcd.print("Hz");
       break;
       
@@ -421,4 +403,26 @@ void print_system_status() {
   Serial.print("Frecuencia CMP: ");
   Serial.print(cmp_frequency);
   Serial.println(" Hz");
+  Serial.print("Período CKP: ");
+  Serial.print(ckp_period_us);
+  Serial.println(" µs");
+  Serial.print("Período CMP: ");
+  Serial.print(cmp_period_us);
+  Serial.println(" µs");
+}
+
+// ===== ESCANEO I2C (para encontrar dirección LCD) =====
+void check_lcd_address() {
+  Serial.println("\nEscaneando direcciones I2C...");
+  Wire.begin(21, 22);
+  
+  for (byte i = 8; i < 120; i++) {
+    Wire.beginTransmission(i);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("Dispositivo encontrado en: 0x");
+      if (i < 16) Serial.print("0");
+      Serial.println(i, HEX);
+    }
+  }
+  Serial.println("Escaneo completado\n");
 }
